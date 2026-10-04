@@ -1,0 +1,94 @@
+# =============================================================================
+# onboard-repo — register a sub-repository in the software factory
+#
+# NOTE ON EXECUTION:
+# As with feature-review, pi 1.0.2 has no native YAML workflow runner. This
+# file is the versioned source-of-truth spec for the step graph below. The
+# executable equivalent is the project prompt template
+# `.pi/prompts/onboard-repo.md`, exposed as the `/onboard-repo` slash
+# command, which drives this graph through pi's `subagent` tool
+# (agentScope: "both").
+#
+# Purpose: a repo that is not in `repos.yml` is out of scope for every other
+# workflow. This is the only way a repo gets in, and the entry must be
+# verified rather than assumed: the commands recorded here are the commands
+# builders and the integrator will run for the lifetime of the repo. A wrong
+# entry is worse than a missing one, because agents trust it.
+#
+# What this workflow records: where the code lives and how to run it.
+# What it must never record: interface shapes, API payloads, schemas. Those
+# are read from code on every run (see AGENTS.md, "Code is the only source of
+# truth"). Onboarding produces a registry entry, never a documentation
+# artifact describing the repo.
+#
+# Git rule: clone/fetch via SSH (git@github.com:<owner>/<name>.git) — never
+# HTTPS.
+# =============================================================================
+
+name: onboard-repo
+description: >-
+  Clone a repository, verify its lint/typecheck/test commands actually run,
+  and register it in repos.yml so other workflows can use it.
+version: 1
+
+initial_step: probe
+final_step: confirm
+
+steps:
+  - id: probe
+    agent: analyst
+    title: Clone the repo and verify its commands
+    input: >-
+      the repository as owner/name (or a full SSH URL), plus any hints the
+      user gave about role, default branch, or commands
+    prompt: |
+      Clone the repository via SSH into .repo/<name> if it is not already
+      there, then determine, read-only:
+        - default branch, primary language, package manager
+        - the repo's real install, lint, typecheck, test, integration-test,
+          and build commands, found in package.json / Makefile /
+          pyproject.toml / tox.ini / CI config / README (cite path:line for
+          each)
+        - which other registered repos it consumes or is consumed by, based
+          on imports, HTTP clients, event names, and dependency manifests
+          (cite evidence; do not describe the interfaces themselves)
+        - required env vars, credentials, services, or setup steps needed
+          before the commands pass
+      Then RUN the candidate install, lint, typecheck, and test commands.
+      This workflow is the one case where running the suite is explicitly
+      authorized. Report each command verbatim with pass/fail and the first
+      lines of any failure. A command you could not run or that failed must
+      be reported as such, never recorded as working.
+      Finish with a proposed repos.yml entry in the exact shape documented in
+      repos.yml, using null for commands the repo does not have, and the ref
+      (commit sha) you inspected.
+    next: register
+
+  - id: register
+    agent: registrar
+    title: Write the verified entry into repos.yml
+    input: the analyst's probe report and proposed entry
+    prompt: |
+      Add or update exactly one entry in repos.yml from the analyst's
+      verified report. Copy only what the analyst confirmed: set a command to
+      null when it does not exist, and leave it out with a note when the
+      analyst could not verify it. Never invent a command, a path, or a
+      dependency edge. Preserve the file's existing entries, ordering
+      convention, and comments. repos.yml is the only file you may touch.
+    next: confirm
+
+  - id: confirm
+    agent: orchestrator
+    title: Report the entry and pause
+    input: the written entry and the probe results
+    prompt: |
+      Present to the user: the registry entry as written, every command with
+      its pass/fail result, anything unverified and why, required env/setup,
+      and the dependency edges with their evidence. Then PAUSE: do not
+      commit, push, or open a pull request. If any command failed or could
+      not be run, say plainly that the entry is partial and which other
+      workflows will be affected by that gap.
+    pause_before:
+      - git commit
+      - git push
+      - pull request creation

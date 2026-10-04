@@ -1,0 +1,47 @@
+# Repository registry — the single list of repos the software factory works on.
+#
+# The planner reads this to decide which repos a feature touches. The analyst
+# reads it to clone and inspect. Builders read it to know which commands to
+# run. Keep it current: an entry that lies is worse than a missing entry.
+#
+# Rules:
+#   - Clones live under .repo/<name> (gitignored). Always SSH, never HTTPS.
+#   - `commands` are what builders/integrator actually run. If a repo has no
+#     such command, set it to null so the agent reports "not configured"
+#     instead of inventing one.
+#   - This file records where things live and how to run them. It does NOT
+#     record interface shapes, API payloads, or schemas: those are read from
+#     code every run (see AGENTS.md, "Code is the only source of truth").
+
+version: 1
+clone_root: .repo
+git_host: git@github.com
+default_owner: jaxkodex
+
+repos: []
+
+# ---------------------------------------------------------------------------
+# Entry shape (copy, uncomment, fill in):
+#
+# repos:
+#   - name: example-api             # unique; also the .repo/ directory name
+#     owner: jaxkodex
+#     url: git@github.com:jaxkodex/example-api.git
+#     path: .repo/example-api
+#     role: backend                 # backend | frontend | shared-lib | infra | ...
+#     default_branch: main
+#     language: typescript
+#     package_manager: pnpm
+#     commands:
+#       install: pnpm install --frozen-lockfile
+#       lint: pnpm lint
+#       typecheck: pnpm typecheck
+#       test: pnpm test
+#       test_integration: pnpm test:integration   # or null
+#       build: pnpm build
+#     depends_on: []                # other registry names this repo consumes
+#     consumed_by: []               # other registry names that consume it
+#     notes: >-
+#       Anything an agent needs to know before touching it: required env vars,
+#       migration tooling, areas that are off-limits, flaky suites.
+# ---------------------------------------------------------------------------

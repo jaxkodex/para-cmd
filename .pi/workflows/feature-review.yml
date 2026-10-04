@@ -1,0 +1,161 @@
+# =============================================================================
+# feature-review — cross-repository feature workflow (declarative spec)
+#
+# NOTE ON EXECUTION:
+# pi 1.0.2 has no native YAML workflow runner: `.pi/workflows/` is not read by
+# pi, and there is no `workflow_signal` tool. This file is the versioned
+# source-of-truth spec for the step graph below. The executable equivalent is
+# the project prompt template `.pi/prompts/feature-review.md`, exposed as the
+# `/feature-review` slash command, which drives this exact graph through pi's
+# `subagent` tool (agentScope: "both", so the project agents in .pi/agents/
+# are used).
+#
+# Adaptation vs. a hypothetical native runner:
+#   workflow_signal(signal: "approved" | "changes_needed")
+#     -> the reviewer's final message MUST end with a machine-parseable block:
+#          VERDICT: approved
+#        or
+#          VERDICT: changes_needed
+#          FEEDBACK:
+#          - repo: ... | task: ... | file/area: ... | issue: ... | fix: ...
+#        (defined in .pi/agents/reviewer.md; the orchestrator parses it)
+#
+# Agent definitions live in .pi/agents/{planner,builder,reviewer,integrator,analyst}.md
+#
+# Helper agent (on demand, not a graph step):
+#   analyst -> when any step needs facts from a repository that is not locally
+#   available (API behavior, payloads, schemas, history), the orchestrator
+#   dispatches the analyst (one dispatch = one repo = one question). The
+#   analyst clones the repo via SSH into .repo/<name> if missing, inspects it
+#   read-only, and reports back with evidence. Its report is the deliverable:
+#   the workflow never produces documentation artifacts (contract docs, API
+#   docs, analysis reports) unless the user explicitly asks.
+#
+# Source-of-truth rule: there is no contracts directory. Cross-repo
+# interfaces (APIs, shared types, event payloads, schemas) are established by
+# reading the code at a named ref, cited as repo:path:line + commit. Written
+# contracts and plans go stale faster than they get updated, and a stale
+# contract is worse than none because agents trust it. Any interface fact not
+# verified in the current run is unverified: re-read the code. If it cannot
+# be verified from code, stop and report it.
+#
+# Git rule: all clone/fetch/push operations use SSH
+# (git@github.com:jaxkodex/<repo>.git) — never HTTPS.
+#
+# Artifact rule: docs/plans/ is gitignored per-run workflow scratch. Plans
+# are written and read locally during a run but never committed, and old
+# plans are stale by default, not reference material. Workflow deliverables
+# are code + tests only.
+# =============================================================================
+
+name: feature-review
+description: >-
+  Cross-repository feature planning, implementation, review, and integration
+  across the central repository and its sub-repositories.
+version: 1
+
+initial_step: plan
+final_step: integrate
+
+# Maximum number of review iterations (build -> review -> changes_needed -> build ...)
+loop_max: 5
+loop_exhausted: stop and report remaining reviewer feedback to the user
+
+steps:
+  - id: plan
+    agent: planner
+    title: Plan the feature across repositories
+    input: the user's feature request (verbatim)
+    prompt: |
+      You are planning a feature across the central repository and its
+      sub-repositories. Inspect the central repository first, then discover
+      and verify the relevant sub-repositories (see the repository registry in
+      AGENTS.md). Identify affected repositories, affected APIs, shared types,
+      events, and database schemas by reading the code that defines them,
+      citing repo:path:line and the ref inspected. Where repo-side facts
+      cannot be read locally (an API's actual behavior, payloads, schemas),
+      flag them for the orchestrator to resolve by dispatching the analyst
+      agent — do not document or guess them. Do not create documentation
+      artifacts (contracts, API docs); analysis happens directly against the
+      repos, every run. Also identify dependencies between
+      repositories, and the required execution order.
+      Record risks, migrations, rollout concerns, and a rollback strategy.
+      Produce a structured plan with a task graph of exactly one task per
+      repository per builder, with dependencies and acceptance criteria.
+      Never assign a task that modifies a repository outside its declared
+      scope; avoid scope creep. Save the plan to
+      docs/plans/<feature-slug>/plan.md and a machine-readable
+      docs/plans/<feature-slug>/tasks.yaml.
+    next: build
+
+  - id: build
+    agent: builder
+    title: Implement exactly one task in exactly one repository
+    input: >-
+      the next unimplemented task from docs/plans/<feature-slug>/tasks.yaml in
+      dependency order; when returning via changes_needed, the reviewer's
+      FEEDBACK lines for the affected task(s)
+    prompt: |
+      Implement exactly one assigned task from the planner's task graph in
+      exactly one repository. Write only within that repository's root;
+      do not modify another repository unless the task explicitly authorizes a
+      cross-repo interface change. Implement the smallest correct change that
+      satisfies the task's acceptance criteria, add or update tests, and run
+      the repository's lint, typecheck, and test commands. If a required
+      API, shared type, event payload, migration, or dependency cannot be
+      found in the code, stop and report the exact missing item instead of
+      guessing. Verify the interfaces you consume by reading their definition
+      in this run; never trust the plan's description of them. Finish with the
+      required report: summary, changed files, commands run and results, test
+      results, assumptions, open questions, and cross-repo impacts (reported,
+      never silently implemented).
+    next: review
+
+  - id: review
+    agent: reviewer
+    title: Review the builders' changes against the plan
+    input: >-
+      the feature request, the plan (docs/plans/<feature-slug>/plan.md), the
+      task graph, and the builders' reports; actual changes via git diff/status
+    prompt: |
+      Review the builders' changes read-only, against: the original feature
+      request, the planner's output and task graph, repository boundaries,
+      cross-repo interfaces (verified against the producing code at a named
+      ref, never against a document), correctness, security,
+      performance, error handling, observability, tests, migrations,
+      documentation, and rollback safety. Do not rewrite the implementation;
+      run only non-mutating validation commands. Use changes_needed only for
+      blocking issues. End your final message with the mandatory verdict
+      block: "VERDICT: approved" or "VERDICT: changes_needed" followed by
+      FEEDBACK lines that each identify repository, task ID, file/area, issue,
+      and required fix.
+    transitions:
+      approved: integrate
+      changes_needed:
+        goto: build
+        with_feedback: >-
+          pass the reviewer's FEEDBACK lines back to the builder for the
+          affected task(s); the loop_max counter applies to this review loop
+    loop_max: 5
+
+  - id: integrate
+    agent: integrator
+    title: Validate combined changes and prepare the commit/PR summary
+    input: >-
+      the approved plan, all builder reports, and all review verdicts
+    prompt: |
+      Validate the combined implementation in the central repository. Run
+      integration tests, producer/consumer compatibility checks done by
+      reading both sides' code (or via analyst reports), and any relevant
+      end-to-end checks across the affected repositories. Update
+      documentation, changelog, or migration notes only when required.
+      Produce a concise commit/PR summary: what changed, repositories
+      changed, cross-repo interfaces introduced or modified with code
+      evidence, tests added,
+      migration/rollout notes, and remaining risks. Then PAUSE: do not create
+      or push a commit and do not open a pull request — present the summary
+      and wait for the user's explicit approval.
+    pause_before:
+      - git commit
+      - git push
+      - pull request creation

@@ -1,0 +1,9 @@
+.env
+data/
+__pycache__/
+jev_answers.jsonl
+jev_classification.csv
+.repo/
+# workflow scratch (per-run plans) — local-only, never committed, stale once
+# the run ends. Durable history goes in projects/<slug>/SUMMARY.md instead.
+docs/
