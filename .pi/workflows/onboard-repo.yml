@@ -22,7 +22,11 @@
 # artifact describing the repo.
 #
 # Git rule: clone/fetch via SSH (git@github.com:<owner>/<name>.git) — never
-# HTTPS.
+# HTTPS. The owner is the one the user gave; it lands in the entry's `url`,
+# and every later workflow reads the owner from there.
+#
+# Agents: .pi/agents/{analyst,registrar}.md. The final `confirm` step has no
+# agent: the orchestrator (the prompt template) reports it and stops.
 # =============================================================================
 
 name: onboard-repo
@@ -54,7 +58,8 @@ steps:
           (cite evidence; do not describe the interfaces themselves)
         - required env vars, credentials, services, or setup steps needed
           before the commands pass
-      Then RUN the candidate install, lint, typecheck, and test commands.
+      Then RUN the candidate install, lint, typecheck, and test commands
+      (`build` and `test_integration` are recorded from config, not run).
       This workflow is the one case where running the suite is explicitly
       authorized. Report each command verbatim with pass/fail and the first
       lines of any failure. A command you could not run or that failed must
@@ -78,7 +83,7 @@ steps:
     next: confirm
 
   - id: confirm
-    agent: orchestrator
+    agent: none          # orchestrator-owned: the prompt template does this itself
     title: Report the entry and pause
     input: the written entry and the probe results
     prompt: |

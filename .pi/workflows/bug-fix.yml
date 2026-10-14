@@ -1,0 +1,204 @@
+# =============================================================================
+# bug-fix — diagnose-first defect workflow (declarative spec)
+#
+# NOTE ON EXECUTION:
+# pi 1.0.2 has no native YAML workflow runner: `.pi/workflows/` is not read by
+# pi, and there is no `workflow_signal` tool. This file is the versioned
+# source-of-truth spec for the step graph below. The executable equivalent is
+# the project prompt template `.pi/prompts/bug-fix.md`, exposed as the
+# `/bug-fix` slash command, which drives this exact graph through pi's
+# `subagent` tool (agentScope: "both", so the project agents in .pi/agents/
+# are used).
+#
+# Adaptation vs. a hypothetical native runner:
+#   workflow_signal(signal: "approved" | "changes_needed")
+#     -> the reviewer's final message MUST end with a machine-parseable block:
+#          VERDICT: approved
+#        or
+#          VERDICT: changes_needed
+#          FEEDBACK:
+#          - repo: ... | task: ... | file/area: ... | issue: ... | fix: ...
+#        (defined in .pi/agents/reviewer.md; the orchestrator parses it)
+#
+# Why this is separate from feature-review:
+#   A bug report is a symptom, not a feature request. The expensive and risky
+#   part of a defect is locating the cause, not discovering scope or
+#   interfaces. feature-review's planner would build a task graph before the
+#   cause is known, and the resulting "fix" treats the symptom. So the bug
+#   graph replaces plan with an evidence-gated diagnose step (the triager),
+#   and makes the red->green regression test a required deliverable. From
+#   `review` onward it is identical to feature-review and reuses the same
+#   reviewer and integrator unchanged — the integrator is already the terminal
+#   gate (validate -> publish -> PR -> CI -> merge).
+#
+# Agent definitions live in .pi/agents/{triager,builder,reviewer,integrator,analyst}.md
+# The orchestrator is the prompt template itself, not an agent file.
+#
+# Refresh (run before triage) is not an agent dispatch: it is the deterministic
+# script scripts/refresh-repos.sh, run once by the orchestrator. It clones any
+# registered repo whose clone is absent, then fetches and --ff-only
+# fast-forwards each clean default branch. Dirty/wrong-branch/diverged clones
+# are reported, never fixed.
+#
+# Helper agent (on demand, not a graph step):
+#   analyst -> when the cause lives in a repository that is not locally
+#   available, the orchestrator dispatches the analyst (one dispatch = one
+#   repo = one question). Its report is the deliverable: the workflow never
+#   produces documentation artifacts (contract docs, API docs, analysis
+#   reports) unless the user explicitly asks.
+#
+# Source-of-truth rule: there is no contracts directory. Cross-repo
+# interfaces are established by reading the code at a named ref, cited as
+# repo:path:line + commit. Any interface or cause fact not verified in the
+# current run is unverified: re-read the code. If it cannot be verified from
+# code, stop and report it.
+#
+#
+# Run scoping: <run-id> is minted and reserved by
+# `scripts/refresh-repos.sh --run <slug>` in the refresh step, returned as
+# `run_id` in its JSON report, and carried by the orchestrator into every
+# builder/reviewer/integrator dispatch. No agent invents one. Format, worktree
+# and branch layout, and the collision rule are defined in AGENTS.md,
+# "Run-scoped scratch" — not repeated here.
+# Git rule: all clone/fetch/push operations use SSH, with the owner taken from
+# the repo's repos.yml entry (git@github.com:<owner>/<name>.git) — never
+# HTTPS, and never a hardcoded org.
+#
+# Artifact rule: docs/plans/ is gitignored per-run workflow scratch. Plans and
+# diagnoses are written and read locally during a run but never committed, and
+# old ones are stale by default, not reference material. Workflow deliverables
+# are code + tests only.
+# =============================================================================
+
+name: bug-fix
+description: >-
+  Diagnose-first defect workflow: prove the root cause from code, fix it with a
+  red->green regression test, review, integrate, and publish (PR + CI + merge).
+version: 1
+
+initial_step: triage
+final_step: publish
+
+# Maximum number of review iterations (fix -> review -> changes_needed -> fix ...)
+loop_max: 5
+loop_exhausted: stop and report remaining reviewer feedback to the user
+
+steps:
+  - id: triage
+    agent: triager
+    title: Establish the verified root cause and the fix task graph
+    input: >-
+      the user's bug report (verbatim), plus the refreshed refs of all
+      registered clones (the orchestrator runs scripts/refresh-repos.sh first:
+      it clones absent repos, then fetches and fast-forwards each clean default
+      branch, reporting old -> new sha; dirty/wrong-branch/diverged clones are
+      reported, not fixed)
+    prompt: |
+      You are diagnosing a bug. Turn the report into a verified root cause or
+      stop. Read the code at the refreshed refs and cite the faulty path as
+      repo:path:line @ <sha>, explaining the mechanism that produces the
+      reported behavior. If the cause lives in a repo that is not locally
+      available, stop and say so (the orchestrator will dispatch the analyst).
+      Do not fix the symptom and do not plan a fix against an unproven cause:
+      a root cause is either read from code, or defined as a regression test
+      that fails at the base ref for the diagnosed reason. Restate the
+      symptom, state the blast radius (affected repos; callers/consumers of
+      the faulty code, read from code; data/migration impact; rollback), and
+      produce a task graph of exactly one fix task per repository per builder,
+      in dependency order, each carrying the smallest fix and the
+      regression-test file to add, with acceptance criteria that include "the
+      regression test fails at base <sha> and passes after the fix". Save
+      docs/plans/<bug-slug>/diagnosis.md and docs/plans/<bug-slug>/tasks.yaml.
+      Never assign a task that modifies a repository outside its declared
+      scope; avoid scope creep. Start your final message with
+      "TRIAGE: verified" or "TRIAGE: blocked".
+    next: fix
+
+  - id: fix
+    agent: builder
+    title: Implement exactly one fix task in exactly one repository
+    input: >-
+      the next unimplemented task from docs/plans/<bug-slug>/tasks.yaml in
+      dependency order; when returning via changes_needed, the reviewer's
+      FEEDBACK lines for the affected task(s)
+    prompt: |
+      Implement exactly one fix task from the triager's graph in exactly one
+      repository. Work in a dedicated run-scoped git worktree branched from
+      the registered clone — `.repo/worktrees/<run-id>/<repo>-<task-id>`,
+      branch `factory/<run-id>/<repo>/<task-id>` (<run-id> comes from your
+      dispatch); see .pi/agents/builder.md for the exact layout and collision
+      guards. Never modify the registered clone itself. Write only within that
+      worktree. This is a bug fix: implement the smallest correct change that
+      removes the diagnosed cause, not a refactor and not a symptom guard.
+      Write the regression test first, capture its FAILURE at the base ref
+      (before the fix) with the command and output, then apply the fix and
+      show the test green and the repository's lint, typecheck, and test
+      commands passing. If the diagnosed cause turns out not to match the code
+      you read, stop and report the discrepancy instead of inventing a
+      different fix. Finish with the required report: summary, changed files,
+      commands run and results (including the red output), test results,
+      assumptions, open questions, and cross-repo impacts (reported, never
+      silently implemented).
+    next: review
+
+  - id: review
+    agent: reviewer
+    title: Review the fix against the diagnosis
+    input: >-
+      the bug report, the diagnosis (docs/plans/<bug-slug>/diagnosis.md), the
+      task graph, and the builders' reports; actual changes via git diff/status
+    prompt: |
+      Review the builders' changes read-only, against: the original bug report,
+      the triager's diagnosis and task graph, repository boundaries, the
+      fix's correctness and security, and its regression test. For a bug fix,
+      block on: the fix addresses the DIAGNOSED cause rather than a symptom or
+      a caller-side guard; the regression test actually exercises the faulty
+      path (it would go red without the fix); no scope creep; no interface
+      change that disagrees with the producing code. Do not rewrite the
+      implementation; run only non-mutating validation commands. Use
+      changes_needed only for blocking issues. End your final message with the
+      mandatory verdict block: "VERDICT: approved" or "VERDICT:
+      changes_needed" followed by FEEDBACK lines that each identify repository,
+      task ID, file/area, issue, and required fix.
+    transitions:
+      approved: integrate
+      changes_needed:
+        goto: fix
+        with_feedback: >-
+          pass the reviewer's FEEDBACK lines back to the builder for the
+          affected task(s); the loop_max counter applies to this review loop
+    loop_max: 5
+
+  - id: integrate
+    agent: integrator
+    title: Validate the combined fix and prepare the commit/PR summary
+    input: >-
+      the diagnosis, all builder reports, and all review verdicts
+    prompt: |
+      Validate the combined fix. Run integration tests, producer/consumer
+      compatibility checks done by reading both sides' code (or via analyst
+      reports), and any relevant end-to-end checks across the affected
+      repositories. Confirm the regression test genuinely fails at the base
+      ref and passes now. Update documentation, changelog, or migration notes
+      only when required. Produce a concise commit/PR summary: what changed,
+      repositories changed, cross-repo interfaces introduced or modified with
+      code evidence, tests added, migration/rollout notes, and remaining
+      risks. Do not push or open PRs in this step — publish does that next.
+    next: publish
+
+  - id: publish
+    agent: integrator
+    title: Push, open PRs, wait for CI, merge
+    input: >-
+      an `INTEGRATION: pass` summary, plus the per-repo worktree paths and
+      final factory branches from the builder reports
+    prompt: |
+      Integration passed. Execute the publish protocol in .pi/agents/integrator.md
+      — the final state of this workflow is MERGED PRs. From each repo's
+      worktree: push its final factory branch, open one PR against the repo's
+      default branch (body from the integration summary), watch CI to
+      completion, and merge only on green (squash unless the user said
+      otherwise). If CI fails or a merge is blocked, do not merge and do not
+      force-push: report the failing checks verbatim so the orchestrator can
+      route fixes back through the fix->review loop. When every PR is merged,
+      remove the worktrees and report per repo: PR URL, CI outcome, merge sha.

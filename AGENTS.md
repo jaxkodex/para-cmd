@@ -1,9 +1,14 @@
 # Agent notes
 
-This repo (private) is a playground for prototypes.
-It is not the production project.
+This private repo is the central controller of a multi-agent software factory.
+The code it changes lives elsewhere: sub-repos are cloned into `.repo/`
+(gitignored) and worked on in place. Nothing here is deployed, but the
+workflows below push branches, open PRs, and merge them in the real
+sub-repos, so treat their rules as binding.
 
-- Use this repo for quick scripts and experiments against real data.
+- `projects/` and ad-hoc scripts are the playground: quick experiments
+  against real data belong there.
+- The factory itself (`.pi/`, `repos.yml`, `scripts/`) is not a playground.
 
 ## Workspace Structure (PARA Method)
 
@@ -11,7 +16,7 @@ This repo is organized using the PARA method:
 
 - `projects/` — Active investigations and initiatives with a defined outcome. Each project gets its own folder with a `SUMMARY.md`.
 - `areas/` — Ongoing areas of responsibility (no end date).
-- `resources/` — Reference material and knowledge.
+- `resources/` — Secrets and build/deploy config, git-crypt encrypted (see "Local resources" below).
 - `archive/` — Completed or inactive items moved here when done.
 
 When asked to "create a project", create a new folder under `projects/` with a `SUMMARY.md` capturing the context.
@@ -24,18 +29,54 @@ the matching prompt template in `.pi/prompts/`.
 
 | Workflow | Command | Purpose |
 |----------|---------|---------|
-| `feature-review` | `/feature-review "<feature request>"` | Plan, build, review (loop, max 5), integrate a feature across repos |
+| `feature-review` | `/feature-review "<feature request>"` | Plan, build, review (loop, max 5), integrate, publish (PR + CI + merge) a feature across repos |
+| `bug-fix` | `/bug-fix "<bug report>"` | Prove the root cause, fix with a red→green regression test, review (loop, max 5), integrate, publish (PR + CI + merge) a bug |
 | `onboard-repo` | `/onboard-repo "<owner/name>"` | Clone a repo, verify its commands, register it in `repos.yml` |
 
-Agents: `.pi/agents/{planner,builder,reviewer,integrator,analyst,registrar}.md`.
-A repo must be onboarded before any feature work can target it.
+Agents: `.pi/agents/{triager,planner,builder,reviewer,integrator,analyst,registrar}.md`.
+The orchestrator is the prompt template itself, not an agent file.
+The builder, reviewer, integrator, and analyst are shared by more than one
+workflow; the planner belongs to `feature-review`, the triager to `bug-fix`,
+and the registrar to `onboard-repo`.
+A repo must be onboarded before any feature or bug work can target it.
+
+Both `feature-review` and `bug-fix` run the same seven steps: refresh, plan
+or diagnose, build, review, review loop, integrate, publish.
+
+### Run-scoped scratch
+
+Every run gets a `<run-id>` (`<slug>-<6 random chars>`). It is minted by
+`scripts/refresh-repos.sh --run <slug>` in Step 1, never invented by an agent:
+the script draws the suffix from `/dev/urandom` and reserves
+`.repo/worktrees/<run-id>/` with a bare `mkdir`, which fails if the namespace
+is already taken, then writes the `.factory-run.json` marker. It comes back as
+`run_id` in the refresh report, and the orchestrator carries it into every
+builder, reviewer, and integrator dispatch. Worktrees live at `.repo/worktrees/<run-id>/<repo>-<task-id>` and
+branches at `factory/<run-id>/<repo>/<task-id>`, so concurrent runs cannot
+collide. The run-agnostic layout (`factory/<repo>/<task-id>`) is forbidden.
+Any agent that finds a foreign run's worktree, branch, or `.factory-run.json`
+marker in its own namespace stops with `STATUS: collision` and reports it;
+nothing is overwritten, reset, or deleted.
 
 ## Repositories & cloning
 
 Sub-repository clones live under `.repo/` (gitignored) and are created on
-demand by the **analyst** agent (one dispatch = one repo = one question; it
-clones, inspects read-only, and reports back). Always clone/fetch/push via
-SSH — `git@github.com:jaxkodex/<repo>.git` — never HTTPS. Do not generate
+demand in two places: `scripts/refresh-repos.sh` clones every registered repo
+whose clone is absent, and the **analyst** clones a repo it is dispatched to
+inspect if the refresh has not already done so (one dispatch = one repo = one
+question; it inspects read-only and reports back).
+
+Every `feature-review` and `bug-fix` run starts with the orchestrator running
+the deterministic `scripts/refresh-repos.sh`. It clones what is missing, then
+fetches and `--ff-only` fast-forwards each clean clone that is on its
+registered default branch. A missing clone is no longer a reason to stall the
+run; dirty, wrong-branch, diverged, and remote-mismatched clones are still
+reported and left exactly as found. `--no-clone-missing` restores the old
+report-only behavior for a dry run.
+
+Always clone/fetch/push via SSH, using the `url` from the repo's `repos.yml`
+entry — `git@github.com:<owner>/<name>.git`, owner read from the entry, never
+assumed — and never HTTPS. Do not generate
 documentation artifacts (contract docs, API docs, analysis reports); when
 repo knowledge is needed, analyze the repo directly via the analyst.
 
@@ -66,8 +107,9 @@ repositories the factory works on. Agents read it directly; there is no
 markdown copy to drift out of sync.
 
 Each entry carries the repo's name, owner, SSH URL, clone path under
-`.repo/`, role, default branch, and its actual `lint` / `typecheck` /
-`test` / `build` commands, plus `depends_on` / `consumed_by` edges.
+`.repo/`, role, default branch, language, package manager, and its actual
+`install` / `lint` / `typecheck` / `test` / `test_integration` / `build`
+commands, plus `depends_on` / `consumed_by` edges.
 
 Rules:
 
@@ -98,12 +140,42 @@ Rules:
   never guess or stub it in another repo.
 - Interface claims carry evidence (`repo:path:line` + ref) or they are
   treated as assumptions and reported as such.
-- Read-only roles (planner, reviewer, analyst) run only non-mutating commands; the
-  reviewer never rewrites the implementation.
+- Read-only roles never rewrite what they inspect: the planner never
+  modifies repos; the reviewer never rewrites the implementation and runs
+  only non-mutating validation. The analyst is the deliberate exception: it
+  owns clone lifecycle under `.repo/` (the initial `git clone`), and the
+  deterministic `scripts/refresh-repos.sh` is the sanctioned mutator of
+  existing clones, limited to `git fetch` + `merge --ff-only` of a clean
+  default branch (everything else is reported, never fixed). Plain
+  `git pull` stays forbidden everywhere.
 - The reviewer's verdict (`approved` / `changes_needed` + feedback) is the
   only gate between build and integrate; the review loop runs at most 5
   iterations (`loop_max: 5`).
-- No commit, push, or PR without explicit user approval — the integrator
-  prepares the summary and always pauses first.
-- Feature plans live in `docs/plans/<feature-slug>/` (`plan.md`, optional
-  `tasks.yaml`, review notes) and are gitignored per-run scratch.
+- In `bug-fix` the triager's `TRIAGE: verified` is the gate before any fix
+  exists. On `TRIAGE: blocked` the run stops: no fix task may be created
+  against an unproven cause, and the fix must remove the diagnosed cause
+  rather than guard the symptom. Its regression test is red at the base ref
+  and green after the fix, and the builder, reviewer, and integrator each
+  check that.
+- Publishing is automated, not user-gated: once the reviewer approves and
+  integration validation passes, the integrator pushes each repo's
+  `factory/*` branch, opens one PR per repo, waits for CI, and merges on
+  green (squash by default). The gates are the reviewer's verdict,
+  integration validation, and CI — never a human pause.
+- Feature plans live in `docs/plans/<feature-slug>/` and bug diagnoses in
+  `docs/plans/<bug-slug>/`. Both carry two required files: `plan.md` or
+  `diagnosis.md`, and `tasks.yaml` (the orchestrator reads the task graph
+  from it and confirms both exist before building). All of `docs/` is
+  gitignored, so these are per-run scratch and stale once the run ends.
+## Local resources (`resources/`, git-crypt)
+
+`resources/` holds the secrets and config needed to build, run and deploy apps. Use these directly — don't ask the user for them.
+
+| File | Feeds |
+|---|---|
+
+The build scripts read `resources/` themselves.
+
+- If files read as binary starting with `GITCRYPT`, the repo is locked: ask
+  the user to run `git-crypt unlock <key-file>` (key is kept outside the repo,
+  often as base64 — decode with `base64 --decode`).

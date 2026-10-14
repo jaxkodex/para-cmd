@@ -21,6 +21,14 @@
 #        (defined in .pi/agents/reviewer.md; the orchestrator parses it)
 #
 # Agent definitions live in .pi/agents/{planner,builder,reviewer,integrator,analyst}.md
+# The orchestrator is the prompt template itself, not an agent file.
+#
+# Refresh (step 1) is not an agent dispatch: it is the deterministic script
+# scripts/refresh-repos.sh, run once by the orchestrator before planning. It
+# clones any registered repo whose clone is absent, then owns the only
+# sanctioned mutation of existing clones (fetch + --ff-only of a clean default
+# branch). Dirty/wrong-branch/diverged/remote-mismatched clones are reported,
+# never fixed.
 #
 # Helper agent (on demand, not a graph step):
 #   analyst -> when any step needs facts from a repository that is not locally
@@ -39,8 +47,16 @@
 # verified in the current run is unverified: re-read the code. If it cannot
 # be verified from code, stop and report it.
 #
-# Git rule: all clone/fetch/push operations use SSH
-# (git@github.com:jaxkodex/<repo>.git) — never HTTPS.
+#
+# Run scoping: <run-id> is minted and reserved by
+# `scripts/refresh-repos.sh --run <slug>` in the refresh step, returned as
+# `run_id` in its JSON report, and carried by the orchestrator into every
+# builder/reviewer/integrator dispatch. No agent invents one. Format, worktree
+# and branch layout, and the collision rule are defined in AGENTS.md,
+# "Run-scoped scratch" — not repeated here.
+# Git rule: all clone/fetch/push operations use SSH, with the owner taken from
+# the repo's repos.yml entry (git@github.com:<owner>/<name>.git) — never
+# HTTPS, and never a hardcoded org.
 #
 # Artifact rule: docs/plans/ is gitignored per-run workflow scratch. Plans
 # are written and read locally during a run but never committed, and old
@@ -55,7 +71,7 @@ description: >-
 version: 1
 
 initial_step: plan
-final_step: integrate
+final_step: publish
 
 # Maximum number of review iterations (build -> review -> changes_needed -> build ...)
 loop_max: 5
@@ -65,12 +81,19 @@ steps:
   - id: plan
     agent: planner
     title: Plan the feature across repositories
-    input: the user's feature request (verbatim)
+    input: >-
+      the user's feature request (verbatim), plus the JSON refresh report from
+      scripts/refresh-repos.sh (the orchestrator runs it once before planning:
+      it clones absent repos, fetches origin, and fast-forwards each clean
+      default branch, emitting per-repo state, old -> new sha, worktrees, and
+      in-flight factory branches; dirty/wrong-branch/diverged clones are
+      reported, never fixed)
     prompt: |
       You are planning a feature across the central repository and its
       sub-repositories. Inspect the central repository first, then discover
-      and verify the relevant sub-repositories (see the repository registry in
-      AGENTS.md). Identify affected repositories, affected APIs, shared types,
+      and verify the relevant sub-repositories from the registry at repos.yml
+      (the only list of repos; there is no markdown copy of it).
+      Identify affected repositories, affected APIs, shared types,
       events, and database schemas by reading the code that defines them,
       citing repo:path:line and the ref inspected. Where repo-side facts
       cannot be read locally (an API's actual behavior, payloads, schemas),
@@ -97,8 +120,13 @@ steps:
       FEEDBACK lines for the affected task(s)
     prompt: |
       Implement exactly one assigned task from the planner's task graph in
-      exactly one repository. Write only within that repository's root;
-      do not modify another repository unless the task explicitly authorizes a
+      exactly one repository. Work in a dedicated run-scoped git worktree branched from
+      the registered clone — `.repo/worktrees/<run-id>/<repo>-<task-id>`,
+      branch `factory/<run-id>/<repo>/<task-id>` (<run-id> comes from your
+      dispatch); see .pi/agents/builder.md for the exact layout and collision
+      guards. Never modify the registered clone itself. Write only within
+      that worktree; do not modify another repository unless the task
+      explicitly authorizes a
       cross-repo interface change. Implement the smallest correct change that
       satisfies the task's acceptance criteria, add or update tests, and run
       the repository's lint, typecheck, and test commands. If a required
@@ -144,7 +172,8 @@ steps:
     input: >-
       the approved plan, all builder reports, and all review verdicts
     prompt: |
-      Validate the combined implementation in the central repository. Run
+      Validate the combined implementation across every builder-reported
+      worktree (the central repository included when it has changes). Run
       integration tests, producer/consumer compatibility checks done by
       reading both sides' code (or via analyst reports), and any relevant
       end-to-end checks across the affected repositories. Update
@@ -152,10 +181,24 @@ steps:
       Produce a concise commit/PR summary: what changed, repositories
       changed, cross-repo interfaces introduced or modified with code
       evidence, tests added,
-      migration/rollout notes, and remaining risks. Then PAUSE: do not create
-      or push a commit and do not open a pull request — present the summary
-      and wait for the user's explicit approval.
-    pause_before:
-      - git commit
-      - git push
-      - pull request creation
+      migration/rollout notes, and remaining risks. Do not push or open PRs
+      in this step — publish does that next.
+    next: publish
+
+  - id: publish
+    agent: integrator
+    title: Push, open PRs, wait for CI, merge
+    input: >-
+      an `INTEGRATION: pass` summary, plus the per-repo worktree paths and
+      final factory branches from the builder reports
+    prompt: |
+      Integration passed. Execute the publish
+      protocol in .pi/agents/integrator.md — the final state of this workflow
+      is MERGED PRs. From each repo's worktree: push its final factory
+      branch, open one PR against the repo's default branch (body from the
+      integration summary), watch CI to completion, and merge only on green
+      (squash unless the user said otherwise). If CI fails or a merge is
+      blocked, do not merge and do not force-push: report the failing checks
+      verbatim so the orchestrator can route fixes back through the
+      build->review loop. When every PR is merged, remove the worktrees and
+      report per repo: PR URL, CI outcome, merge sha.
