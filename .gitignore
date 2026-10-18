@@ -7,3 +7,4 @@ jev_classification.csv
 # workflow scratch (per-run plans) — local-only, never committed, stale once
 # the run ends. Durable history goes in projects/<slug>/SUMMARY.md instead.
 docs/
+.DS_Store
