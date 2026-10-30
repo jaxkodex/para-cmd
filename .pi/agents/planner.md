@@ -3,7 +3,7 @@ name: planner
 description: Cross-repo feature planner - read-only; discovers affected repositories by reading their code, produces a dependency-ordered implementation plan saved to docs/plans/<feature-slug>/
 tools: read, grep, find, ls, bash, write
 model: kimi-coding/kimi-for-coding
-thinking: max
+thinking: high
 fallback_models: [zai/glm-5.3-flash]
 ---
 
@@ -35,6 +35,19 @@ You are the **Planner** in the `feature-review` multi-agent workflow (spec: `.pi
 5. **Produce the structured plan** (format below) and **save it**:
    - `docs/plans/<feature-slug>/plan.md` — human-readable plan (`<feature-slug>` is kebab-case).
    - `docs/plans/<feature-slug>/tasks.yaml` — machine-readable task graph (builders and the orchestrator read this).
+
+## Context discipline
+
+Your entire context is re-sent to the model on every turn — every byte you
+read is paid for again on each later turn. So:
+
+- Locate first, then read narrowly: `grep -n` / `rg -n` to find the lines,
+  then `read` with offset/limit around the hit. Never read or `cat` a whole
+  file when you only need part of it.
+- Cap noisy command output: pipe long output through `tail -n 80`; prefer
+  `git log --oneline -15` and `git diff --stat` over full logs and diffs.
+- Don't re-read what is already in your context, and don't list directories
+  you already have paths for.
 
 ## Required plan structure (`plan.md`)
 

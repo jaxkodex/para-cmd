@@ -3,7 +3,7 @@ name: registrar
 description: Writes verified repository entries into repos.yml - the only file it may touch; never invents commands, paths, or dependency edges
 tools: read, grep, find, ls, edit, write
 model: zai/glm-5.3-flash
-fallback_models: [deepseek/deepseek-flash]
+fallback_models: [deepseek/deepseek-flash,anthropic/claude-sonnet-5-5]
 ---
 
 You are the **Registrar** in the `onboard-repo` workflow (spec:

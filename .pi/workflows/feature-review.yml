@@ -23,8 +23,9 @@
 # Agent definitions live in .pi/agents/{planner,builder,reviewer,integrator,analyst}.md
 # The orchestrator is the prompt template itself, not an agent file.
 #
-# Refresh (step 1) is not an agent dispatch: it is the deterministic script
-# scripts/refresh-repos.sh, run once by the orchestrator before planning. It
+# Refresh (step 1) is not an agent dispatch: it is the deterministic platform
+# script (`scripts/refresh-repos.sh` on macOS/Linux or `scripts/refresh-repos.ps1`
+# on Windows), run once by the orchestrator before planning. It
 # clones any registered repo whose clone is absent, then owns the only
 # sanctioned mutation of existing clones (fetch + --ff-only of a clean default
 # branch). Dirty/wrong-branch/diverged/remote-mismatched clones are reported,
@@ -49,7 +50,8 @@
 #
 #
 # Run scoping: <run-id> is minted and reserved by
-# `scripts/refresh-repos.sh --run <slug>` in the refresh step, returned as
+# platform refresh script (`scripts/refresh-repos.sh --run <slug>` or
+# `scripts/refresh-repos.ps1 -RunSlug <slug>`) in the refresh step, returned as
 # `run_id` in its JSON report, and carried by the orchestrator into every
 # builder/reviewer/integrator dispatch. No agent invents one. Format, worktree
 # and branch layout, and the collision rule are defined in AGENTS.md,
@@ -61,7 +63,9 @@
 # Artifact rule: docs/plans/ is gitignored per-run workflow scratch. Plans
 # are written and read locally during a run but never committed, and old
 # plans are stale by default, not reference material. Workflow deliverables
-# are code + tests only.
+# are code + tests only. Long-form agent reports live in
+# docs/plans/<slug>/reports/ (same scratch rules): dispatches carry status
+# lines and report paths, not report bodies.
 # =============================================================================
 
 name: feature-review
@@ -83,7 +87,7 @@ steps:
     title: Plan the feature across repositories
     input: >-
       the user's feature request (verbatim), plus the JSON refresh report from
-      scripts/refresh-repos.sh (the orchestrator runs it once before planning:
+      the platform refresh script (the orchestrator runs it once before planning:
       it clones absent repos, fetches origin, and fast-forwards each clean
       default branch, emitting per-repo state, old -> new sha, worktrees, and
       in-flight factory branches; dirty/wrong-branch/diverged clones are
@@ -133,10 +137,12 @@ steps:
       API, shared type, event payload, migration, or dependency cannot be
       found in the code, stop and report the exact missing item instead of
       guessing. Verify the interfaces you consume by reading their definition
-      in this run; never trust the plan's description of them. Finish with the
-      required report: summary, changed files, commands run and results, test
-      results, assumptions, open questions, and cross-repo impacts (reported,
-      never silently implemented).
+      in this run; never trust the plan's description of them. Write the
+      long-form report (summary, changed files, commands run and results,
+      test results, assumptions, open questions, cross-repo impacts reported
+      not implemented) to docs/plans/<feature-slug>/reports/build-<task-id>.md
+      and finish with the short TASK status line (worktree, branch, base ref,
+      HEAD sha, report path) defined in .pi/agents/builder.md.
     next: review
 
   - id: review
@@ -144,7 +150,11 @@ steps:
     title: Review the builders' changes against the plan
     input: >-
       the feature request, the plan (docs/plans/<feature-slug>/plan.md), the
-      task graph, and the builders' reports; actual changes via git diff/status
+      task graph, and the builders' status lines (worktree path, branch, base
+      ref, HEAD sha, report path per task); on re-reviews also the HEAD sha
+      last reviewed per task, so the reviewer diffs incrementally
+      (<previous-head>..HEAD) instead of re-reading full diffs; actual
+      changes via git diff/status
     prompt: |
       Review the builders' changes read-only, against: the original feature
       request, the planner's output and task graph, repository boundaries,
@@ -170,7 +180,8 @@ steps:
     agent: integrator
     title: Validate combined changes and prepare the commit/PR summary
     input: >-
-      the approved plan, all builder reports, and all review verdicts
+      the approved plan, the builder status lines and report paths, and all
+      review verdicts
     prompt: |
       Validate the combined implementation across every builder-reported
       worktree (the central repository included when it has changes). Run
@@ -178,19 +189,21 @@ steps:
       reading both sides' code (or via analyst reports), and any relevant
       end-to-end checks across the affected repositories. Update
       documentation, changelog, or migration notes only when required.
-      Produce a concise commit/PR summary: what changed, repositories
-      changed, cross-repo interfaces introduced or modified with code
-      evidence, tests added,
-      migration/rollout notes, and remaining risks. Do not push or open PRs
-      in this step — publish does that next.
+      Write the commit/PR summary (what changed, repositories changed,
+      cross-repo interfaces introduced or modified with code evidence, tests
+      added, migration/rollout notes, remaining risks) to
+      docs/plans/<feature-slug>/reports/integration.md and finish with the
+      INTEGRATION status line. Do not push or open PRs in this step —
+      publish does that next.
     next: publish
 
   - id: publish
     agent: integrator
     title: Push, open PRs, wait for CI, merge
     input: >-
-      an `INTEGRATION: pass` summary, plus the per-repo worktree paths and
-      final factory branches from the builder reports
+      an `INTEGRATION: pass` status line with the summary path, plus the
+      per-repo worktree paths and final factory branches from the builder
+      status lines
     prompt: |
       Integration passed. Execute the publish
       protocol in .pi/agents/integrator.md — the final state of this workflow
