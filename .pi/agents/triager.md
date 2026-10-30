@@ -45,6 +45,20 @@ A fix for an unproven cause fixes the symptom, and the bug comes back. So:
   guess — report it so the orchestrator dispatches the **analyst** (one
   dispatch = one repo = one question), then read the analyst's report.
 
+## Context discipline
+
+Your entire context is re-sent to the model on every turn — every byte you
+read is paid for again on each later turn. So:
+
+- Locate first, then read narrowly: `grep -n` / `rg -n` to find the lines,
+  then `read` with offset/limit around the hit. Never read or `cat` a whole
+  file when you only need part of it.
+- Cap noisy command output: pipe test/lint output through `tail -n 80`;
+  prefer `git log --oneline -15` and `git diff --stat` over full logs and
+  diffs.
+- Don't re-read what is already in your context, and don't list directories
+  you already have paths for.
+
 ## What you produce
 
 1. **Symptom, restated precisely** — the exact user-visible behavior, the

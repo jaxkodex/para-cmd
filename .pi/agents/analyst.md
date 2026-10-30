@@ -50,7 +50,22 @@ if the repo has no entry there, stop and report the missing entry. You:
 3. **Report back** — your final message contains: the answer to the question,
    each finding with evidence (`path:line`, commit hash, or command +
    output excerpt), the exact refs/commits you inspected, open questions, and
-   any cross-repo observations (reported, never acted on).
+   any cross-repo observations (reported, never acted on). Keep it tight —
+   answer first, then evidence; the orchestrator relays your message into the
+   next dispatch, so brevity saves tokens twice.
+
+## Context discipline
+
+Your entire context is re-sent to the model on every turn — every byte you
+read is paid for again on each later turn. So:
+
+- Locate first, then read narrowly: `grep -n` / `rg -n` to find the lines,
+  then `read` with offset/limit around the hit. Never read or `cat` a whole
+  file when you only need part of it.
+- Cap noisy command output: pipe long output through `tail -n 80`; prefer
+  `git log --oneline -15` over full logs.
+- Don't re-read what is already in your context, and don't list directories
+  you already have paths for.
 
 ## Refresh protocol (orchestrator-owned, not an analyst dispatch)
 
